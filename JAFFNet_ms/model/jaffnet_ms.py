@@ -1,21 +1,23 @@
 import mindspore
 import mindspore.nn as nn
 import mindspore.ops as ops
+import pandas as pd
 
 from mindspore import Parameter
 def conv3x3(in_planes, out_planes, stride=1):
     "3x3 convolution with padding"
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3,pad_mode='pad', stride=stride,
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, pad_mode='pad', stride=stride,
                      padding=1, has_bias=False)
 class BasicBlock(nn.Cell):
     expansion=1
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
+    def __init__(self, inplanes, planes, stride=1, dilation=1, downsample=None,
+                 previous_dilation=1, norm_layer=nn.BatchNorm2d):
         super(BasicBlock, self).__init__()
         self.conv1 = conv3x3(inplanes, planes, stride)
-        self.bn1 = nn.BatchNorm2d(planes)
+        self.bn1 = norm_layer(planes)
         self.relu = nn.ReLU()
         self.conv2 = conv3x3(planes, planes)
-        self.bn2 = nn.BatchNorm2d(planes)
+        self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
     def construct(self, x):
@@ -31,6 +33,223 @@ class BasicBlock(nn.Cell):
         out += residual
         out = self.relu(out)
         return out
+
+class MRF(nn.Cell):
+    def __init__(self, in_channels, out_channels,rate=[1,2,4,8]):
+        super(MRF, self).__init__()
+
+        inner_channels=in_channels//4
+
+        self.gap = nn.AdaptiveAvgPool2d(1)
+
+        self.conv1= nn.SequentialCell(
+            nn.Conv2d(in_channels, inner_channels, 1, padding=0, pad_mode='pad', has_bias=True),
+            nn.BatchNorm2d(inner_channels),
+            nn.ReLU(),
+            nn.Conv2d(inner_channels, inner_channels, 3, dilation=rate[0], padding=rate[0], pad_mode='pad', has_bias=True),
+            nn.BatchNorm2d(inner_channels),
+            nn.ReLU(),
+        )
+        self.conv2 = nn.SequentialCell(
+            nn.Conv2d(in_channels, inner_channels, 1, padding=0, pad_mode='pad', has_bias=True),
+            nn.BatchNorm2d(inner_channels),
+            nn.ReLU(),
+            nn.Conv2d(inner_channels, inner_channels, 3, dilation=rate[1], padding=rate[1], pad_mode='pad',
+                      has_bias=True),
+            nn.BatchNorm2d(inner_channels),
+            nn.ReLU(),
+        )
+
+        self.conv3 = nn.SequentialCell(
+            nn.Conv2d(in_channels, inner_channels, 1, padding=0, pad_mode='pad', has_bias=True),
+            nn.BatchNorm2d(inner_channels),
+            nn.ReLU(),
+            nn.Conv2d(inner_channels, inner_channels, 3, dilation=rate[2], padding=rate[2], pad_mode='pad',
+                      has_bias=True),
+            nn.BatchNorm2d(inner_channels),
+            nn.ReLU(),
+        )
+
+        self.pro = nn.SequentialCell(
+            nn.Conv2d(inner_channels * 3, out_channels, 1, padding=0, pad_mode='pad', has_bias=True),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU()
+        )
+
+    def construct(self, x):
+
+        feat1 = self.conv1(x)
+        feat2 = self.conv2(x)
+        feat3 = self.conv3(x)
+
+
+        out= mindspore.ops.cat([feat1,feat2,feat3],axis=1)
+
+        return self.pro(out)
+
+class DRF(nn.Cell):
+    def __init__(self, in_channels):
+        super(DRF, self).__init__()
+        out_channels =512
+        self.mrf1 = MRF(in_channels,out_channels)
+        self.mrf2 = MRF(in_channels,out_channels)
+        self.mrf3 = MRF(in_channels,out_channels)
+        self.gap=nn.AdaptiveAvgPool2d(1)
+        self.conv4 = nn.SequentialCell(
+            nn.Conv2d(in_channels, in_channels, 1,pad_mode='pad', padding=0, has_bias=True),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(),
+        )
+        self.relu= nn.ReLU()
+        self.pro = nn.SequentialCell(
+            nn.Conv2d(in_channels , out_channels, 3, padding=1, pad_mode='pad', has_bias=True),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+        )
+
+
+
+    def construct(self, x):
+
+        size = x.shape[2:]
+        feat1 = self.mrf1(x)
+        input = x + feat1
+        feat2 = self.mrf2(input)
+        input = x+feat1+feat2
+        feat3 = self.mrf3(input)
+
+        feat4_pre1 = self.gap(x)
+        feat4_pre2=self.conv4(feat4_pre1)
+        feat4=ops.interpolate(feat4_pre2, size, mode="bilinear", align_corners=True)
+
+        feat = x+feat1+feat2+feat3+feat4
+        out = self.pro(feat)
+        return out
+class ChannelAttentionModule(nn.Cell):
+    def __init__(self, channel, ratio=16):
+        super(ChannelAttentionModule, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.shared_MLP = nn.SequentialCell(
+            nn.Conv2d(channel, channel // ratio, 1, has_bias=False, pad_mode='pad'),
+            nn.ReLU(),
+            nn.Conv2d(channel // ratio, channel, 1, has_bias=False, pad_mode='pad')
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def construct(self, x):
+        avgout = self.shared_MLP(self.avg_pool(x))
+        maxout = self.shared_MLP(self.max_pool(x))
+        return avgout + maxout
+
+class SpatialAttentionModule(nn.Cell):
+    def __init__(self):
+        super(SpatialAttentionModule, self).__init__()
+        self.conv2d = nn.Conv2d(in_channels=2, out_channels=1, kernel_size=7, stride=1, padding=3, pad_mode='pad', has_bias=True)
+        self.sigmoid = nn.Sigmoid()
+
+    def construct(self, x):
+        avgout = ops.mean(x, axis=1, keep_dims=True)
+        maxout, _ = ops.max(x, axis=1, keepdims=True)
+        out=ops.cat([avgout,maxout],axis=1)
+        out=self.conv2d(out)
+        return out
+
+# class CBAM(nn.Cell):
+#     def __init__(self, channel):
+#         super(CBAM, self).__init__()
+#         self.channel_attention = ChannelAttentionModule(channel)
+#         self.spatial_attention = SpatialAttentionModule()
+#         self.sigmoid = nn.Sigmoid()
+#
+#     def construct(self, x):
+#         c_out = self.channel_attention(x)
+#         s_out = self.spatial_attention(x)
+#         return self.sigmoid(c_out+s_out)
+
+class Flatten(nn.Cell):
+    def construct(self, x):
+        return x.view(x.size(0), -1)
+
+class ChannelGate(nn.Cell):
+    def __init__(self, gate_channel, reduction_ratio=16, num_layers=1):
+        super(ChannelGate, self).__init__()
+        self.gate_c = nn.SequentialCell()
+        self.gate_c.insert_child_to_cell('flatten', Flatten())
+
+        gate_channels = [gate_channel]  # eg 64
+        gate_channels += [gate_channel // reduction_ratio] * num_layers  # eg 4
+        gate_channels += [gate_channel]  # 64
+        # gate_channels: [64, 4, 4]
+
+        for i in range(len(gate_channels) - 2):
+            self.gate_c.insert_child_to_cell(
+                'gate_c_fc_%d' % i,
+                nn.Dense(gate_channels[i], gate_channels[i + 1]))
+            self.gate_c.insert_child_to_cell('gate_c_bn_%d' % (i + 1),
+                                   nn.BatchNorm1d(gate_channels[i + 1]))
+            self.gate_c.insert_child_to_cell('gate_c_relu_%d' % (i + 1), nn.ReLU())
+
+        self.gate_c.insert_child_to_cell('gate_c_fc_final',
+                               nn.Dense(gate_channels[-2], gate_channels[-1]))
+
+    def construct(self, x):
+        avg_pool = ops.avg_pool2d(x, x.shape(2), stride=x.shape(2))
+
+        return self.gate_c(avg_pool).unsqueeze(2).unsqueeze(3).expand_as(x)
+
+class SpatialGate(nn.Cell):
+    def __init__(self,
+                 gate_channel,
+                 reduction_ratio=16,
+                 dilation_conv_num=2,
+                 dilation_val=4):
+        super(SpatialGate, self).__init__()
+        self.gate_s = nn.SequentialCell()
+
+        self.gate_s.insert_child_to_cell(
+            'gate_s_conv_reduce0',
+            nn.Conv2d(gate_channel,
+                      gate_channel // reduction_ratio,
+                      kernel_size=1, pad_mode='pad', has_bias=True))
+        self.gate_s.insert_child_to_cell('gate_s_bn_reduce0',
+                               nn.BatchNorm2d(gate_channel // reduction_ratio),)
+        self.gate_s.insert_child_to_cell('gate_s_relu_reduce0', nn.ReLU())
+
+        # 进行多个空洞卷积，丰富感受野
+        for i in range(dilation_conv_num):
+            self.gate_s.insert_child_to_cell(
+                'gate_s_conv_di_%d' % i,
+                nn.Conv2d(gate_channel // reduction_ratio,
+                          gate_channel // reduction_ratio,
+                          kernel_size=3,
+                          padding=dilation_val,
+                          dilation=dilation_val), pad_mode='pad', has_bias=True)
+            self.gate_s.insert_child_to_cell(
+                'gate_s_bn_di_%d' % i,
+                nn.BatchNorm2d(gate_channel // reduction_ratio))
+            self.gate_s.insert_child_to_cell('gate_s_relu_di_%d' % i, nn.ReLU())
+
+        self.gate_s.insert_child_to_cell(
+            'gate_s_conv_final',
+            nn.Conv2d(gate_channel // reduction_ratio, 1, kernel_size=1),pad_mode='pad', has_bias=True)
+
+    def construct(self, x):
+        return self.gate_s(x).expand_as(x)
+
+
+class BAM(nn.Cell):
+    def __init__(self, gate_channel):
+        super(BAM, self).__init__()
+        self.channel_att = ChannelGate(gate_channel)
+        self.spatial_att = SpatialGate(gate_channel)
+
+    def construct(self, x):
+        att = ops.sigmoid(self.channel_att(x) * self.spatial_att(x))
+        return att
+
+
 class ResnetBlock(nn.Cell):
     def __init__(self, inchannel, outchannel, stride=1) -> None:
         super(ResnetBlock, self).__init__()
@@ -95,224 +314,9 @@ class ResNet18(nn.Cell):
             self.inchannel = channels
         return nn.SequentialCell(*layers)
 
-class MRF(nn.Cell):
-    def __init__(self, in_channels, out_channels, rate=None):
-        super(MRF, self).__init__()
-
-        if rate is None:
-            rate = [1, 2, 4, 8]
-        inner_channels=in_channels//4
-
-        self.gap = nn.AdaptiveAvgPool2d(1)
-
-        self.conv1= nn.SequentialCell(
-            nn.Conv2d(in_channels, inner_channels, 1),
-            nn.BatchNorm2d(inner_channels),
-            nn.ReLU(),
-            nn.Conv2d(inner_channels, inner_channels, 3, dilation=rate[0], padding=rate[0],pad_mode='pad'),
-            nn.BatchNorm2d(inner_channels),
-            nn.ReLU(),
-        )
-        self.conv2 = nn.SequentialCell(
-            nn.Conv2d(in_channels, inner_channels, 1),
-            nn.BatchNorm2d(inner_channels),
-            nn.ReLU(),
-            nn.Conv2d(inner_channels, inner_channels, 3, dilation=rate[1], padding=rate[1],pad_mode='pad'),
-            nn.BatchNorm2d(inner_channels),
-            nn.ReLU(),
-        )
-
-
-        self.conv3 = nn.SequentialCell(
-            nn.Conv2d(in_channels, inner_channels, 1),
-            nn.BatchNorm2d(inner_channels),
-            nn.ReLU(),
-            nn.Conv2d(inner_channels, inner_channels, 3, dilation=rate[2], padding=rate[2],pad_mode='pad'),
-            nn.BatchNorm2d(inner_channels),
-            nn.ReLU(),
-            )
-
-        self.pro = nn.SequentialCell(
-            nn.Conv2d(inner_channels * 3, out_channels, 1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU()
-        )
-
-    def construct(self, x):
-
-        feat1 = self.conv1(x)
-        feat2 = self.conv2(x)
-        feat3 = self.conv3(x)
-
-
-        out= mindspore.ops.cat([feat1,feat2,feat3],axis=1)
-
-        return self.pro(out)
-
-class DRF(nn.Cell):
-    def __init__(self, in_channels):
-        super(DRF, self).__init__()
-        out_channels =512
-        self.mrf1 = MRF(in_channels,out_channels)
-        self.mrf2 = MRF(in_channels,out_channels)
-        self.mrf3 = MRF(in_channels,out_channels)
-        self.gap=nn.AdaptiveAvgPool2d(1)
-        self.conv4 = nn.SequentialCell(
-            nn.Conv2d(in_channels, in_channels, 1,pad_mode='pad'),
-            nn.BatchNorm2d(in_channels),
-            nn.ReLU(),
-        )
-        self.relu= nn.ReLU()
-        self.pro = nn.SequentialCell(
-            nn.Conv2d(in_channels , out_channels, 3, padding=1,pad_mode='pad'),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(),
-        )
 
 
 
-    def construct(self, x):
-
-        size = x.shape[2:]
-        feat1 = self.mrf1(x)
-        input = x + feat1
-        feat2 = self.mrf2(input)
-        input = x+feat1+feat2
-        feat3 = self.mrf3(input)
-
-        feat4_pre1 = self.gap(x)
-        feat4_pre2=self.conv4(feat4_pre1)
-        feat4=ops.interpolate(feat4_pre2, size, mode="bilinear", align_corners=True)
-
-        feat = x+feat1+feat2+feat3+feat4
-        out = self.pro(feat)
-        return out
-
-
-class ChannelAttentionModule(nn.Cell):
-    def __init__(self, channel, ratio=16):
-        super(ChannelAttentionModule, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-        self.shared_MLP = nn.SequentialCell(
-            nn.Conv2d(channel, channel // ratio, 1, has_bias=False),
-            nn.ReLU(),
-            nn.Conv2d(channel // ratio, channel, 1, has_bias=False)
-        )
-        self.sigmoid = nn.Sigmoid()
-
-    def construct(self, x):
-        avgout = self.shared_MLP(self.avg_pool(x))
-        maxout = self.shared_MLP(self.max_pool(x))
-        return avgout + maxout
-
-
-class SpatialAttentionModule(nn.Cell):
-    def __init__(self):
-        super(SpatialAttentionModule, self).__init__()
-        self.conv2d = nn.Conv2d(in_channels=2, out_channels=1, kernel_size=7, stride=1, padding=3)
-        self.sigmoid = nn.Sigmoid()
-
-    def construct(self, x):
-        avgout = ops.mean(x, axis=1, keep_dims=True)
-        maxout, _ = ops.max(x, axis=1, keepdims=True)
-        out=ops.cat([avgout,maxout],axis=1)
-        out=self.conv2d(out)
-        return out
-
-
-class CBAM(nn.Cell):
-    def __init__(self, channel):
-        super(CBAM, self).__init__()
-        self.channel_attention = ChannelAttentionModule(channel)
-        self.spatial_attention = SpatialAttentionModule()
-        self.sigmoid = nn.Sigmoid()
-
-    def construct(self, x):
-        c_out = self.channel_attention(x)
-        s_out = self.spatial_attention(x)
-        return self.sigmoid(c_out+s_out)
-
-class Flatten(nn.Cell):
-    def construct(self, x):
-        return x.view(x.size(0), -1)
-
-
-class ChannelGate(nn.Cell):
-    def __init__(self, gate_channel, reduction_ratio=16, num_layers=1):
-        super(ChannelGate, self).__init__()
-        self.gate_c = nn.SequentialCell()
-        self.gate_c.insert_child_to_cell('flatten', Flatten())
-
-        gate_channels = [gate_channel]  # eg 64
-        gate_channels += [gate_channel // reduction_ratio] * num_layers  # eg 4
-        gate_channels += [gate_channel]  # 64
-        # gate_channels: [64, 4, 4]
-
-        for i in range(len(gate_channels) - 2):
-            self.gate_c.insert_child_to_cell(
-                'gate_c_fc_%d' % i,
-                nn.Dense(gate_channels[i], gate_channels[i + 1]))
-            self.gate_c.insert_child_to_cell('gate_c_bn_%d' % (i + 1),
-                                   nn.BatchNorm1d(gate_channels[i + 1]))
-            self.gate_c.insert_child_to_cell('gate_c_relu_%d' % (i + 1), nn.ReLU())
-
-        self.gate_c.insert_child_to_cell('gate_c_fc_final',
-                               nn.Dense(gate_channels[-2], gate_channels[-1]))
-
-    def construct(self, x):
-        avg_pool = ops.avg_pool2d(x, x.shape(2), stride=x.shape(2))
-
-        return self.gate_c(avg_pool).unsqueeze(2).unsqueeze(3).expand_as(x)
-
-class SpatialGate(nn.Cell):
-    def __init__(self,
-                 gate_channel,
-                 reduction_ratio=16,
-                 dilation_conv_num=2,
-                 dilation_val=4):
-        super(SpatialGate, self).__init__()
-        self.gate_s = nn.SequentialCell()
-
-        self.gate_s.insert_child_to_cell(
-            'gate_s_conv_reduce0',
-            nn.Conv2d(gate_channel,
-                      gate_channel // reduction_ratio,
-                      kernel_size=1))
-        self.gate_s.insert_child_to_cell('gate_s_bn_reduce0',
-                               nn.BatchNorm2d(gate_channel // reduction_ratio))
-        self.gate_s.insert_child_to_cell('gate_s_relu_reduce0', nn.ReLU())
-
-        # 进行多个空洞卷积，丰富感受野
-        for i in range(dilation_conv_num):
-            self.gate_s.insert_child_to_cell(
-                'gate_s_conv_di_%d' % i,
-                nn.Conv2d(gate_channel // reduction_ratio,
-                          gate_channel // reduction_ratio,
-                          kernel_size=3,
-                          padding=dilation_val,
-                          dilation=dilation_val))
-            self.gate_s.insert_child_to_cell(
-                'gate_s_bn_di_%d' % i,
-                nn.BatchNorm2d(gate_channel // reduction_ratio))
-            self.gate_s.insert_child_to_cell('gate_s_relu_di_%d' % i, nn.ReLU())
-
-        self.gate_s.insert_child_to_cell(
-            'gate_s_conv_final',
-            nn.Conv2d(gate_channel // reduction_ratio, 1, kernel_size=1))
-
-    def construct(self, x):
-        return self.gate_s(x).expand_as(x)
-class BAM(nn.Cell):
-    def __init__(self, gate_channel):
-        super(BAM, self).__init__()
-        self.channel_att = ChannelGate(gate_channel)
-        self.spatial_att = SpatialGate(gate_channel)
-
-    def construct(self, x):
-        att =ops.sigmoid(self.channel_att(x) * self.spatial_att(x))
-        return att
 class SELayer(nn.Cell):
     def __init__(self, channel, reduction=16):
         super(SELayer, self).__init__()
@@ -337,24 +341,24 @@ class JAFFM(nn.Cell):
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
         self.conv_a = nn.SequentialCell(
-            nn.Conv2d(in_channels, in_planes, 1, has_bias=False),
+            nn.Conv2d(in_channels, in_planes, 1, has_bias=False, pad_mode='pad'),
             nn.ReLU()
         )
         self.conv_b = nn.SequentialCell(
-            nn.Conv2d(in_channels, in_planes, 1, has_bias=False),
+            nn.Conv2d(in_channels, in_planes, 1, has_bias=False, pad_mode='pad'),
             nn.ReLU()
         )
 
         self.conv1 = nn.SequentialCell(
-            nn.Conv2d(in_planes, in_planes // 16, 1, has_bias=False),
+            nn.Conv2d(in_planes, in_planes // 16, 1, has_bias=False, pad_mode='pad'),
             nn.ReLU(),
         )
         self.conv2 = nn.SequentialCell(
-            nn.Conv2d(in_planes, in_planes // 16, 1, has_bias=False),
+            nn.Conv2d(in_planes, in_planes // 16, 1, has_bias=False, pad_mode='pad'),
             nn.ReLU(),
         )
         self.conv3 = nn.SequentialCell(
-            nn.Conv2d(in_planes // 16, in_planes, 1, has_bias=False),
+            nn.Conv2d(in_planes // 16, in_planes, 1, has_bias=False, pad_mode='pad'),
         )
 
 
@@ -366,7 +370,7 @@ class JAFFM(nn.Cell):
         )
 
         self.pro = nn.SequentialCell(
-            nn.Conv2d(in_planes, in_planes, 3,dilation=2, padding=2, has_bias=False, group=in_planes,pad_mode='pad'),
+            nn.Conv2d(in_planes, in_planes, 3,dilation=2, padding=2, has_bias=False, group=in_planes, pad_mode='pad'),
 
         )
         self.sigmoid = nn.Sigmoid()
@@ -405,7 +409,7 @@ class BasicConv(nn.Cell):
     def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, dilation=1, groups=1, relu=True, bn=True, bias=False):
         super(BasicConv, self).__init__()
         self.out_channels = out_planes
-        self.conv = nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups, has_bias=bias)
+        self.conv = nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups, has_bias=bias,pad_mode='pad')
         self.bn = nn.BatchNorm2d(out_planes, eps=1e-5, momentum=0.99, affine=True) if bn else None
         self.relu = nn.ReLU() if relu else None
     def construct(self, x):
@@ -458,7 +462,7 @@ class JAFFNet(nn.Cell):
         ## -------------Encoder--------------
 
         self.inconv = nn.SequentialCell(
-            nn.Conv2d(3, 64, 3, padding=1,pad_mode='pad'),
+            nn.Conv2d(3, 64, 3, padding=1,pad_mode='pad',has_bias=True),
             nn.BatchNorm2d(64),
             nn.ReLU(),
         )
@@ -482,48 +486,54 @@ class JAFFNet(nn.Cell):
         # stage 5g
         self.decoder5_g = nn.SequentialCell(
 
-            nn.Conv2d(1024, 512, 3, padding=1,pad_mode='pad'),
+            nn.Conv2d(1024, 512, 3, padding=1,pad_mode='pad',has_bias=True),
             nn.BatchNorm2d(512),
             nn.ReLU(),
 
-            nn.Conv2d(512, 512, 3, padding=1,pad_mode='pad'),
+            nn.Conv2d(512, 512, 3, padding=1,pad_mode='pad',has_bias=True),
             nn.BatchNorm2d(512),
             nn.ReLU(),
         )
         # stage 4g
         self.decoder4_g = nn.SequentialCell(
-            nn.Conv2d(1024, 512, 3, padding=1,pad_mode='pad'),
+            nn.Conv2d(1024, 512, 3, padding=1,pad_mode='pad',has_bias=True),
             nn.BatchNorm2d(512),
             nn.ReLU(),
 
-            nn.Conv2d(512, 256, 3, padding=1,pad_mode='pad'),
+            nn.Conv2d(512, 256, 3, padding=1,pad_mode='pad',has_bias=True),
             nn.BatchNorm2d(256),
             nn.ReLU(),
         )
         # stage 3g
         self.decoder3_g = nn.SequentialCell(
 
-            nn.Conv2d(512, 256, 3, padding=1,pad_mode='pad'),
+            nn.Conv2d(512, 256, 3, padding=1,pad_mode='pad',has_bias=True),
             nn.BatchNorm2d(256),
             nn.ReLU(),
 
-            nn.Conv2d(256, 128, 3, padding=1,pad_mode='pad'),
+            nn.Conv2d(256, 128, 3, padding=1,pad_mode='pad',has_bias=True),
             nn.BatchNorm2d(128),
             nn.ReLU(),
         )
         # stage 2g
         self.decoder2_g = nn.SequentialCell(
-            nn.Conv2d(256, 128, 3, padding=1,pad_mode='pad'),
+            nn.Conv2d(256, 128, 3, padding=1,pad_mode='pad',has_bias=True),
             nn.BatchNorm2d(128),
             nn.ReLU(),
 
-            nn.Conv2d(128, 64, 3, padding=1,pad_mode='pad'),
+            nn.Conv2d(128, 64, 3, padding=1,pad_mode='pad',has_bias=True),
             nn.BatchNorm2d(64),
             nn.ReLU(),
         )
 
         ## -------------Bilinear Upsampling--------------
 
+        # self.upscore6 = nn.Upsample(scale_factor=32, mode='bilinear',recompute_scale_factor=True)
+        # self.upscore5 = nn.Upsample(scale_factor=32, mode='bilinear',recompute_scale_factor=True)
+        # self.upscore4 = nn.Upsample(scale_factor=32, mode='bilinear',recompute_scale_factor=True)
+        # self.upscore3 = nn.Upsample(scale_factor=32, mode='bilinear',recompute_scale_factor=True)
+        # self.upscore2 = nn.Upsample(scale_factor=32, mode='bilinear',recompute_scale_factor=True)
+        # self.upscore1 = nn.Upsample(scale_factor=32, mode='bilinear',recompute_scale_factor=True)
         self.upscore6 = nn.ResizeBilinear()
         self.upscore5 = nn.ResizeBilinear()
         self.upscore4 = nn.ResizeBilinear()
@@ -535,11 +545,11 @@ class JAFFNet(nn.Cell):
 
         '''
         ## -------------Side Output--------------
-        self.outconv6 = nn.Conv2d(512, n_classes, 3, padding=1,pad_mode='pad')
-        self.outconv5 = nn.Conv2d(512, n_classes, 3, padding=1,pad_mode='pad')
-        self.outconv4 = nn.Conv2d(256, n_classes, 3, padding=1,pad_mode='pad')
-        self.outconv3 = nn.Conv2d(128, n_classes, 3, padding=1,pad_mode='pad')
-        self.outconv2 = nn.Conv2d(64, n_classes, 3, padding=1,pad_mode='pad')
+        self.outconv6 = nn.Conv2d(512, n_classes, 3, padding=1,pad_mode='pad',has_bias=True)
+        self.outconv5 = nn.Conv2d(512, n_classes, 3, padding=1,pad_mode='pad',has_bias=True)
+        self.outconv4 = nn.Conv2d(256, n_classes, 3, padding=1,pad_mode='pad',has_bias=True)
+        self.outconv3 = nn.Conv2d(128, n_classes, 3, padding=1,pad_mode='pad',has_bias=True)
+        self.outconv2 = nn.Conv2d(64, n_classes, 3, padding=1,pad_mode='pad',has_bias=True)
 
 
         ## -------------Refine Module-------------
@@ -607,14 +617,13 @@ class JAFFNet(nn.Cell):
         return ops.sigmoid(d2), ops.sigmoid(d3), ops.sigmoid(d4), ops.sigmoid(d5),ops.sigmoid(out_b)
 
 
-
-
-
-
-
 if __name__ == '__main__':
     import mindspore.numpy as np
     input = np.randn((1, 3, 224, 224))
     net = JAFFNet()
     output = net(input)[0]
     print(output.shape)
+    mindspore_model = net
+    prams_ms = mindspore_model.parameters_dict().keys()
+    prams_ms_lst = pd.DataFrame(prams_ms)
+    prams_ms_lst.to_csv('prams_ms.csv')

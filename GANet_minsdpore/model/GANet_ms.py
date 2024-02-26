@@ -2,12 +2,12 @@ import mindspore
 import mindspore.nn as nn
 import mindspore.ops as ops
 from mindspore import Parameter
-
+import pandas as pd
 
 class convbnrelu(nn.Cell):
     def __init__(self, in_channel, out_channel, k=3, s=1, p=1, g=1, d=1, bias=False, bn=True, relu=True):
         super(convbnrelu, self).__init__()
-        conv = [nn.Conv2d(in_channel, out_channel, k, s, padding=p,pad_mode='pad', dilation=d, group=g, has_bias=bias)]
+        conv = [nn.Conv2d(in_channel, out_channel, k, s, padding=p, pad_mode='pad', dilation=d, group=g, has_bias=bias)]
         if bn:
             conv.append(nn.BatchNorm2d(out_channel))
         if relu:
@@ -16,15 +16,16 @@ class convbnrelu(nn.Cell):
 
     def construct(self, x):
         return self.conv(x)
+
 class DSSA(nn.Cell):
     # attention
     def __init__(self, in_channels):
         super().__init__()
 
-        self.conv_b = nn.Conv2d(in_channels, in_channels, 1)
-        self.conv_c = nn.Conv2d(in_channels, in_channels, 1)
-        self.conv_d = nn.Conv2d(in_channels, in_channels, 1)
-        self.conv_e = nn.Conv2d(in_channels, in_channels, 1)
+        self.conv_b = nn.Conv2d(in_channels, in_channels, 1, pad_mode='pad',has_bias=True)
+        self.conv_c = nn.Conv2d(in_channels, in_channels, 1, pad_mode='pad',has_bias=True)
+        self.conv_d = nn.Conv2d(in_channels, in_channels, 1, pad_mode='pad',has_bias=True)
+        self.conv_e = nn.Conv2d(in_channels, in_channels, 1, pad_mode='pad',has_bias=True)
 
         self.softmax = nn.Softmax(axis=1)  # 初始化一个Softmax操作
         self.L21=ops.L2Normalize(axis=-1)
@@ -62,10 +63,10 @@ class MSA(nn.Cell):
         super().__init__()
 
         head_dim = in_channels // num_heads
-        self.conv_b = nn.Conv2d(in_channels, in_channels, 1)
-        self.conv_c = nn.Conv2d(in_channels, in_channels, 1)
-        self.conv_d = nn.Conv2d(in_channels, in_channels, 1)
-        self.conv_e = nn.Conv2d(in_channels, in_channels, 1)
+        self.conv_b = nn.Conv2d(in_channels, in_channels, 1, pad_mod='pad',has_bias=True)
+        self.conv_c = nn.Conv2d(in_channels, in_channels, 1, pad_mod='pad',has_bias=True)
+        self.conv_d = nn.Conv2d(in_channels, in_channels, 1, pad_mod='pad',has_bias=True)
+        self.conv_e = nn.Conv2d(in_channels, in_channels, 1, pad_mod='pad',has_bias=True)
 
         self.softmax = nn.Softmax(axis=-1)  # 初始化一个Softmax操作
 
@@ -128,9 +129,9 @@ class PolyNL(nn.Cell):
     def __init__(self, in_channels):
         super().__init__()
 
-        self.conv_b = nn.Conv2d(in_channels, in_channels, 1)
-        self.conv_c = nn.Conv2d(in_channels, in_channels, 1)
-        self.conv_d = nn.Conv2d(in_channels, in_channels, 1)
+        self.conv_b = nn.Conv2d(in_channels, in_channels, 1, pad_mod='pad',has_bias=True)
+        self.conv_c = nn.Conv2d(in_channels, in_channels, 1, pad_mod='pad',has_bias=True)
+        self.conv_d = nn.Conv2d(in_channels, in_channels, 1, pad_mod='pad',has_bias=True)
 
 
         self.alpha = Parameter(ops.ones(1, mindspore.float32), requires_grad=True)
@@ -183,11 +184,11 @@ class TransformerBlock(nn.Cell):
         self.norm1 = LayerNorm(dim)
         self.norm2 = LayerNorm(dim)
         self.ffn = nn.SequentialCell(
-            nn.Conv2d(dim, dim * 4, 1, has_bias=False),
+            nn.Conv2d(dim, dim * 4, 1,pad_mode='pad', has_bias=False),
             nn.GELU(approximate=False),
             nn.Conv2d(dim * 4, dim * 4, 3, padding=1, stride=1, pad_mode='pad',group=dim * 4, has_bias=False),
             nn.GELU(approximate=False),
-            nn.Conv2d(dim * 4, dim, 1, has_bias=False),
+            nn.Conv2d(dim * 4, dim, 1,pad_mode='pad', has_bias=False),
         )
 
         self.mhsa = DSSA(dim)
@@ -272,7 +273,6 @@ class FAM(nn.Cell):
 
         f_g = self.conv5(f_g)
         f_g = ops.interpolate(f_g, size=(h, w), mode='bilinear', align_corners=True)
-
 
         fused = w_f_l + f_h + f_g
 
@@ -370,7 +370,7 @@ class SalHead(nn.Cell):
     def __init__(self, in_channel):
         super(SalHead, self).__init__()
         self.conv = nn.SequentialCell(
-            nn.Conv2d(in_channel, 1, 1, stride=1, padding=0),
+            nn.Conv2d(in_channel, 1, 1, stride=1, padding=0,pad_mode='pad',has_bias=True),
             nn.Sigmoid()
         )
 
@@ -435,14 +435,14 @@ class VAMM(nn.Cell):
         ### ChannelGate
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.fc1 = convbnrelu(channel, channel, 1, 1, 0, bn=True, relu=True)
-        self.fc2 = nn.Conv2d(channel, (len(self.dilation_level) + 1) * channel, 1, 1, padding=0, has_bias=False)
+        self.fc2 = nn.Conv2d(channel, (len(self.dilation_level) + 1) * channel, 1, 1, padding=0,pad_mode='pad', has_bias=False)
         self.fuse = convbnrelu(channel, channel, k=1, s=1, p=0, relu=False)
         ### SpatialGate
         self.convs = nn.SequentialCell(
             convbnrelu(channel, channel // reduce_factor, 1, 1, 0, bn=True, relu=True),
             DSConv3x3(channel // reduce_factor, channel // reduce_factor, stride=1, dilation=2),
             DSConv3x3(channel // reduce_factor, channel // reduce_factor, stride=1, dilation=4),
-            nn.Conv2d(channel // reduce_factor, 1, 1, 1, padding=0, has_bias=False)
+            nn.Conv2d(channel // reduce_factor, 1, 1, 1, padding=0,pad_mode='pad', has_bias=False)
         )
 
     def construct(self, x):
@@ -489,7 +489,12 @@ class PyramidPooling(nn.Cell):
 
 if __name__ == '__main__':
     import mindspore.numpy as np
-    input = np.randn((1, 3, 224, 224))
+    input = np.randn((2, 3, 224, 224))
     net = GANet()
     output = net(input)
-    print(output[0].shape, output[1].shape, output[2].shape, output[3].shape, output[4].shape,output[5].shape)
+    print(output[0].shape, output[1].shape, output[2].shape, output[3].shape, output[4].shape, output[5].shape)
+
+    mindspore_model = net
+    prams_ms = mindspore_model.parameters_dict().keys()
+    prams_ms_lst = pd.DataFrame(prams_ms)
+    prams_ms_lst.to_csv('prams_ga_ms.csv')

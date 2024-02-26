@@ -9,12 +9,15 @@ import mindspore
 from mindspore.dataset.vision import Inter
 from model.jaffnet_ms import JAFFNet
 from metric import *
+
+# 数据增强
 def val_transforms(img_size):
     return C_transforms.Compose([
     vision_C.Resize(img_size, interpolation=Inter.NEAREST),
     vision_C.Rescale(1/255., 0),
     vision_C.HWC2CHW()
     ])
+
 class Data_Loader:
     def __init__(self, data_path, have_mask):
         # 初始化函数，读取所有data_path下的图片
@@ -88,5 +91,5 @@ if __name__ == '__main__':
     net = JAFFNet()
     mindspore.load_checkpoint("./checkpoint/JAFFNet.ckpt", net=net)
     result_path = "predict"
-    test_dataset = create_dataset("datasets/ISBI/test/", 224, 1, shuffle=False, have_mask=False)
+    test_dataset = create_dataset("datasets/dagm/test/", 224, 1, shuffle=False, have_mask=False)
     model_pred(net, test_dataset, result_path, have_mask=False)

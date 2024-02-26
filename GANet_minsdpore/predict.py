@@ -88,5 +88,5 @@ if __name__ == '__main__':
     net = GANet()
     mindspore.load_checkpoint("./checkpoint/GANet.ckpt", net=net)
     result_path = "predict"
-    test_dataset = create_dataset("datasets/ISBI/test/", 224, 1, shuffle=False, have_mask=False)
+    test_dataset = create_dataset("datasets/dagm/test/", 224, 1, shuffle=False, have_mask=False)
     model_pred(net, test_dataset, result_path, have_mask=False)
