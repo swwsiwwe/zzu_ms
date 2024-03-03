@@ -2,8 +2,8 @@ import mindspore
 import mindspore.nn as nn
 import mindspore.ops as ops
 import pandas as pd
-
 from mindspore import Parameter
+
 def conv3x3(in_planes, out_planes, stride=1):
     "3x3 convolution with padding"
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, pad_mode='pad', stride=stride,
