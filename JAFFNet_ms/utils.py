@@ -42,7 +42,7 @@ def getPth(net):
 
 def pytorch2mindspore(pth_name='res18_py.pth', ckpt_name='res18_py.ckpt'):
     dict = torch2msDICT('prams_ms.csv')
-    par_dict = torch.load(pth_name, map_location=torch.device('cpu'))
+    par_dict = get_Dict(torch.load(pth_name, map_location=torch.device('cpu')))
     new_params_list = []
     for name in par_dict:
         param_dict = {}
@@ -56,6 +56,43 @@ def pytorch2mindspore(pth_name='res18_py.pth', ckpt_name='res18_py.ckpt'):
         new_params_list.append(param_dict)
     save_checkpoint(new_params_list, ckpt_name)
 
+
+def get_Dict(dictionary):
+    dict= {}
+    for old_key in dictionary.keys():
+        value = dictionary[old_key]
+        if 'atten' in old_key:
+            print(old_key)
+            new_key = old_key.replace('atten', 'jaff')
+            print(new_key)
+            dict[new_key] = value
+        elif 'ASPPBlock_' in old_key:
+            print(old_key)
+            new_key = old_key.replace('ASPPBlock_', 'mrf')
+            print(new_key)
+            dict[new_key] = value
+        else:
+            dict[old_key] = value
+    return dict
+
+
+# def getms_Dict(dictionary):
+#     dict= {}
+#     for old_key in dictionary.keys():
+#         value = dictionary[old_key]
+#         if 'jaff' in old_key:
+#             print(old_key)
+#             new_key = old_key.replace('jaff', 'atten')
+#             print(new_key)
+#             dict[new_key] = value
+#         elif 'ASPPBlock_' in old_key:
+#             print(old_key)
+#             new_key = old_key.replace('ASPPBlock_', 'mrf')
+#             print(new_key)
+#             dict[new_key] = value
+#         else:
+#             dict[old_key] = value
+#     return dict
 
 if __name__ == '__main__':
     pytorch2mindspore('jaffnet.pth', 'jaffnet.ckpt')

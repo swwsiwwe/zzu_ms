@@ -12,7 +12,7 @@ class convbnrelu(nn.Cell):
             conv.append(nn.BatchNorm2d(out_channel))
         if relu:
             conv.append(nn.ReLU())
-        self.conv = nn.SequentialCell(*conv)
+        self.conv = nn.SequentialCell(conv)
 
     def construct(self, x):
         return self.conv(x)
@@ -164,8 +164,8 @@ class LayerNorm(nn.Cell):
     def __init__(self, dim, eps=1e-8):
         super(LayerNorm, self).__init__()
 
-        self.gamma = Parameter(ops.ones([1, dim, 1, 1], mindspore.float32), requires_grad=True)
-        self.beta = Parameter(ops.zeros([1, dim, 1, 1], mindspore.float32), requires_grad=True)
+        self.gamma = Parameter(ops.ones((1, dim, 1, 1), mindspore.float32), requires_grad=True)
+        self.beta = Parameter(ops.zeros((1, dim, 1, 1), mindspore.float32), requires_grad=True)
         self.eps = eps
 
     def construct(self, x):
@@ -215,7 +215,7 @@ class RAM(nn.Cell):
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.softmax = nn.Softmax(axis=-1)
 
-        self.scale = Parameter(ops.ones(1),requires_grad=True)
+        self.scale = Parameter(ops.ones(1,mindspore.float32),requires_grad=True)
 
         self.head_num = 4
 
@@ -489,12 +489,23 @@ class PyramidPooling(nn.Cell):
 
 if __name__ == '__main__':
     import mindspore.numpy as np
-    input = np.randn((2, 3, 224, 224))
-    net = GANet()
-    output = net(input)
-    print(output[0].shape, output[1].shape, output[2].shape, output[3].shape, output[4].shape, output[5].shape)
+    import cv2 as cv
+    # import torchvision.transforms as transforms
+    from mindspore import Tensor
 
-    mindspore_model = net
-    prams_ms = mindspore_model.parameters_dict().keys()
-    prams_ms_lst = pd.DataFrame(prams_ms)
-    prams_ms_lst.to_csv('prams_ga_ms.csv')
+    img = cv.imread('0576.PNG')
+
+    img.resize((224, 224, 3))
+    print(img.shape)
+    # img_tensor = np.array(img, dtype=np.float32) / 255.0
+    # img_tensor = np.transpose(img_tensor, axes=(2, 0, 1))
+    img_tensor = Tensor.from_numpy(img)
+    img_tensor = img_tensor[None, :]
+
+    net = GANet()
+    param_dict = mindspore.load_checkpoint('ganet.ckpt')
+    mindspore.load_param_into_net(net, param_dict)
+
+    output = net(img_tensor)
+    print(output[0].shape, output[1].shape, output[2].shape, output[3].shape, output[4].shape, output[5].shape)
+    print(output)

@@ -54,7 +54,9 @@ def pytorch2mindspore(pth_name='res18_py.pth', ckpt_name='res18_py.ckpt'):
         param_dict['name'] = dict[name]
         param_dict['data'] = Tensor(parameter.numpy())
         new_params_list.append(param_dict)
+
     save_checkpoint(new_params_list, ckpt_name)
+
 
 
 if __name__ == '__main__':
